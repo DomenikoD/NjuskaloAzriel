@@ -3,7 +3,7 @@
 Njuskalo Azriel is a Hello World Telegram bot project
 
 ## Me
-I'm just starting to use GitHub and discover its possibilites :)
+I've just startied to use GitHub and am trying to learn a bit about Python and Telegram bot possibilites :)
 
 ## References
 Application  
