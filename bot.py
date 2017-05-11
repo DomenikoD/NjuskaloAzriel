@@ -36,12 +36,14 @@ def send_message(text, chat_id):
     
 
 def main():
+    control_text = "start"
     last_textchat = (None, None)
-    while text!="exit":
+    while control_text!="exit":
         text, chat = get_last_chat_id_and_text(get_updates())
         if (text, chat) != last_textchat:
             send_message(text, chat)
             last_textchat = (text, chat)
+            control_text=text
         time.sleep(0.5)
 
 
