@@ -139,8 +139,14 @@ class LaptopListing:
     deal_rating: str = ""
 
 
-def create_driver() -> webdriver.Chrome:
-    """Create a headless Chrome WebDriver instance."""
+def create_driver(proxy: str = "") -> webdriver.Chrome:
+    """Create a headless Chrome WebDriver instance with anti-detection measures.
+
+    Args:
+        proxy: Optional proxy URL (e.g., 'http://user:pass@host:port' or
+               'socks5://host:port'). Residential proxies are recommended
+               to avoid IP-based bot detection.
+    """
     options = Options()
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
@@ -152,8 +158,29 @@ def create_driver() -> webdriver.Chrome:
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     )
+    # Additional anti-detection flags
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+
+    if proxy:
+        options.add_argument(f"--proxy-server={proxy}")
+        logger.info("Using proxy: %s", proxy.split("@")[-1] if "@" in proxy else proxy)
+
     driver = webdriver.Chrome(options=options)
-    driver.set_page_load_timeout(30)
+    driver.set_page_load_timeout(60)
+
+    # Remove webdriver flag from navigator
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'languages', {get: () => ['hr-HR', 'hr', 'en-US', 'en']});
+                Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+            """
+        },
+    )
+
     return driver
 
 
@@ -415,12 +442,50 @@ def scrape_detail_page(
     return listing
 
 
+def _is_bot_blocked(driver: webdriver.Chrome) -> bool:
+    """Check if the current page is a bot-detection challenge (perfdrive)."""
+    current_url = driver.current_url
+    if "validate.perfdrive.com" in current_url:
+        return True
+    try:
+        soup = BeautifulSoup(driver.page_source, "html.parser")
+        h1 = soup.select_one("h1")
+        if h1 and "ispričavam" in h1.get_text(strip=True).lower():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _wait_for_page_or_detect_block(
+    driver: webdriver.Chrome, max_wait: int = 10
+) -> bool:
+    """Wait for the page to load and check for bot blocking.
+
+    Returns True if the page loaded normally, False if blocked.
+    """
+    for _ in range(max_wait):
+        if _is_bot_blocked(driver):
+            return False
+        # Check if listing content is present
+        try:
+            soup = BeautifulSoup(driver.page_source, "html.parser")
+            if soup.select(".EntityList-item") or soup.select(".entity-title"):
+                return True
+        except Exception:
+            pass
+        time.sleep(1)
+    # Final check
+    return not _is_bot_blocked(driver)
+
+
 def scrape_all_laptops(
     pages_per_category: int = 3,
     min_price: float = 0,
     max_price: float = float("inf"),
     scrape_details: bool = False,
     categories: Optional[list[str]] = None,
+    proxy: str = "",
 ) -> list[LaptopListing]:
     """
     Scrape laptop listings from all brand categories on njuskalo.hr.
@@ -431,13 +496,15 @@ def scrape_all_laptops(
         max_price: Maximum price filter in EUR.
         scrape_details: Whether to visit each listing's detail page.
         categories: List of brand names to scrape (None = all).
+        proxy: Optional proxy URL for anti-bot-detection bypass.
 
     Returns:
         List of LaptopListing objects.
     """
-    driver = create_driver()
+    driver = create_driver(proxy=proxy)
     all_listings: list[LaptopListing] = []
     seen_urls: set[str] = set()
+    bot_blocked = False
 
     cats = categories or list(BRAND_CATEGORIES.keys())
 
@@ -445,6 +512,17 @@ def scrape_all_laptops(
         # Accept cookies on first page load
         driver.get(BASE_URL + "/prijenosna-racunala")
         time.sleep(3)
+
+        if _is_bot_blocked(driver):
+            logger.error(
+                "Bot detection triggered on initial page load. "
+                "njuskalo.hr uses perfdrive anti-bot protection that may "
+                "block datacenter IPs. Try using a residential proxy with "
+                "--proxy http://user:pass@host:port"
+            )
+            bot_blocked = True
+            return all_listings
+
         accept_cookies(driver)
 
         for brand in cats:
@@ -462,6 +540,24 @@ def scrape_all_laptops(
                 try:
                     driver.get(url)
                     time.sleep(3)
+
+                    # Check for bot blocking with retry
+                    if _is_bot_blocked(driver):
+                        logger.warning(
+                            "Bot detection triggered on %s. "
+                            "Waiting 30s before retry...", url
+                        )
+                        time.sleep(30)
+                        driver.get(url)
+                        time.sleep(5)
+                        if _is_bot_blocked(driver):
+                            logger.error(
+                                "Still blocked after retry. "
+                                "Skipping remaining pages for %s. "
+                                "Consider using --proxy.", brand
+                            )
+                            bot_blocked = True
+                            break
 
                     soup = BeautifulSoup(driver.page_source, "html.parser")
                     page_listings = scrape_listing_page(soup, brand)
@@ -494,6 +590,9 @@ def scrape_all_laptops(
                     logger.error("Error scraping page %s: %s", url, e)
                     continue
 
+            if bot_blocked:
+                break
+
         # Optionally scrape detail pages for additional specs
         if scrape_details and all_listings:
             logger.info(
@@ -510,6 +609,15 @@ def scrape_all_laptops(
 
     finally:
         driver.quit()
+
+    if bot_blocked and not all_listings:
+        logger.error(
+            "No listings could be scraped due to bot detection. "
+            "njuskalo.hr blocks datacenter/cloud IPs. Solutions:\n"
+            "  1. Use a residential proxy: --proxy http://user:pass@host:port\n"
+            "  2. Use a SOCKS proxy: --proxy socks5://host:port\n"
+            "  3. Run from a residential IP (home network, VPN)"
+        )
 
     logger.info("Total listings scraped: %d", len(all_listings))
     return all_listings
@@ -961,6 +1069,13 @@ Examples:
         help="Only show laptops with CPUs from the last 2 years",
     )
 
+    parser.add_argument(
+        "--proxy",
+        type=str,
+        default="",
+        help="Proxy URL to bypass bot detection (e.g., http://user:pass@host:port)",
+    )
+
     args = parser.parse_args()
 
     logger.info("Starting Njuskalo.hr Laptop Scraper")
@@ -980,6 +1095,7 @@ Examples:
         max_price=args.max_price,
         scrape_details=args.details,
         categories=args.brands,
+        proxy=args.proxy,
     )
 
     if not listings:
