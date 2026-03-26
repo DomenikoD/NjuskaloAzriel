@@ -95,19 +95,19 @@ CPU_DATABASE = {
     r"ryzen\s*7\s*[56]\d{3}": {"gen": "AMD Zen3/4", "tier": 3, "year": 2022},
     r"ryzen\s*5\s*[56]\d{3}": {"gen": "AMD Zen3/4", "tier": 2, "year": 2022},
     r"ryzen\s*3\s*[56]\d{3}": {"gen": "AMD Zen3/4", "tier": 1, "year": 2022},
-    # Apple Silicon
-    r"m[45]\s*max": {"gen": "Apple M4/M5", "tier": 4, "year": 2024},
-    r"m[45]\s*pro": {"gen": "Apple M4/M5", "tier": 3, "year": 2024},
-    r"m[45]": {"gen": "Apple M4/M5", "tier": 2, "year": 2024},
-    r"m3\s*max": {"gen": "Apple M3", "tier": 4, "year": 2023},
-    r"m3\s*pro": {"gen": "Apple M3", "tier": 3, "year": 2023},
-    r"m3": {"gen": "Apple M3", "tier": 2, "year": 2023},
-    r"m2\s*max": {"gen": "Apple M2", "tier": 4, "year": 2022},
-    r"m2\s*pro": {"gen": "Apple M2", "tier": 3, "year": 2022},
-    r"m2": {"gen": "Apple M2", "tier": 2, "year": 2022},
-    r"m1\s*max": {"gen": "Apple M1", "tier": 3, "year": 2021},
-    r"m1\s*pro": {"gen": "Apple M1", "tier": 3, "year": 2021},
-    r"m1": {"gen": "Apple M1", "tier": 2, "year": 2020},
+    # Apple Silicon (word-boundary anchored to avoid false positives)
+    r"\bm[45]\s*max\b": {"gen": "Apple M4/M5", "tier": 4, "year": 2024},
+    r"\bm[45]\s*pro\b": {"gen": "Apple M4/M5", "tier": 3, "year": 2024},
+    r"\bm[45]\b(?!\s*(?:ssd|hdd|\.2))": {"gen": "Apple M4/M5", "tier": 2, "year": 2024},
+    r"\bm3\s*max\b": {"gen": "Apple M3", "tier": 4, "year": 2023},
+    r"\bm3\s*pro\b": {"gen": "Apple M3", "tier": 3, "year": 2023},
+    r"\bm3\b(?!\s*(?:ssd|hdd|\.2))": {"gen": "Apple M3", "tier": 2, "year": 2023},
+    r"\bm2\s*max\b": {"gen": "Apple M2", "tier": 4, "year": 2022},
+    r"\bm2\s*pro\b": {"gen": "Apple M2", "tier": 3, "year": 2022},
+    r"\bm2\b(?!\s*(?:ssd|hdd|\.2))": {"gen": "Apple M2", "tier": 2, "year": 2022},
+    r"\bm1\s*max\b": {"gen": "Apple M1", "tier": 3, "year": 2021},
+    r"\bm1\s*pro\b": {"gen": "Apple M1", "tier": 3, "year": 2021},
+    r"\bm1\b(?!\s*(?:ssd|hdd|\.2))": {"gen": "Apple M1", "tier": 2, "year": 2020},
 }
 
 
@@ -125,6 +125,7 @@ class LaptopListing:
     cpu: str = ""
     cpu_gen: str = ""
     cpu_tier: int = 0
+    cpu_year: int = 0
     ram_gb: int = 0
     storage_gb: int = 0
     storage_type: str = ""
@@ -212,6 +213,7 @@ def extract_specs_from_text(text: str) -> dict:
             specs["cpu"] = match.group(0).strip()
             specs["cpu_gen"] = info["gen"]
             specs["cpu_tier"] = info["tier"]
+            specs["cpu_year"] = info["year"]
             break
 
     # RAM detection (e.g., "16GB RAM", "8 GB", "32gb")
@@ -338,6 +340,7 @@ def scrape_listing_page(
                 cpu=specs.get("cpu", ""),
                 cpu_gen=specs.get("cpu_gen", ""),
                 cpu_tier=specs.get("cpu_tier", 0),
+                cpu_year=specs.get("cpu_year", 0),
                 ram_gb=specs.get("ram_gb", 0),
                 storage_gb=specs.get("storage_gb", 0),
                 storage_type=specs.get("storage_type", ""),
@@ -378,6 +381,7 @@ def scrape_detail_page(
                 listing.cpu = specs["cpu"]
                 listing.cpu_gen = specs.get("cpu_gen", "")
                 listing.cpu_tier = specs.get("cpu_tier", 0)
+                listing.cpu_year = specs.get("cpu_year", 0)
             if not listing.ram_gb and specs.get("ram_gb"):
                 listing.ram_gb = specs["ram_gb"]
             if not listing.storage_gb and specs.get("storage_gb"):
@@ -688,14 +692,9 @@ def filter_recent_laptops(
     current_year = datetime.now().year
     cutoff_year = current_year - max_age_years
 
-    # Keep listings with recent CPUs or unknown CPU (might still be recent)
-    recent_mask = df["cpu_gen"].apply(
-        lambda gen: any(
-            str(y) in gen
-            for y in range(cutoff_year, current_year + 1)
-        )
-        if gen
-        else False
+    # Keep listings with recent CPUs based on cpu_year field
+    recent_mask = df["cpu_year"].apply(
+        lambda year: year >= cutoff_year if year > 0 else False
     )
 
     # Also check listing date
@@ -868,6 +867,7 @@ def save_to_csv(df: pd.DataFrame, filepath: str) -> None:
         "cpu",
         "cpu_gen",
         "cpu_tier",
+        "cpu_year",
         "ram_gb",
         "storage_gb",
         "storage_type",
